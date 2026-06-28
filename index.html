@@ -733,14 +733,43 @@ const ARRAY_COLLECTIONS=['employees','orders','hours','recurring','positions','p
 const VAPID_PUBLIC_KEY="BAQZUVwHqOXll-9wLzDWwkwkdW_3tGGMdWImu9jwpPc3IY3H4RsZnf4KFdAfhGoOsZ9F1_w0XbkM_BEfnq1tAJU"; /* PASTE your Web Push certificate PUBLIC key here: Firebase Console -> Project settings -> Cloud Messaging -> Web Push certificates -> Generate key pair. Pushes stay OFF until this is filled in; the app works normally either way. */
 const Push=(function(){
   let messaging=null;
-  function init(){ if(typeof firebase==='undefined'||!firebase.messaging||!VAPID_PUBLIC_KEY) return;
+  function dbg(m){try{toast(m);}catch(e){}}
+  function derr(label,e){var s=label+(e&&e.code?(' ['+e.code+']'):'')+': '+((e&&e.message)||e);try{alert(s);}catch(_){toast(s);}}
+  function init(){ if(typeof firebase==='undefined'){return dbg('Push: firebase not loaded');}
+    if(!firebase.messaging){return dbg('Push: messaging SDK missing');}
+    if(!VAPID_PUBLIC_KEY){return dbg('Push: no key set');}
     try{ messaging=firebase.messaging();
       messaging.onMessage(function(p){ try{ var n=(p&&p.notification)||{}; toast((n.title?n.title+' \u2014 ':'')+(n.body||'New work order'),'good'); }catch(e){} });
-    }catch(e){ messaging=null; } }
-  function register(userId,name){ if(!messaging||!userId) return;
-    if(typeof Notification==='undefined'||Notification.permission!=='granted') return;
-    try{ messaging.getToken({vapidKey:VAPID_PUBLIC_KEY}).then(function(token){ if(!token)return;
-        try{ firebase.firestore().collection('pushTokens').doc(token).set({userId:userId,name:name||'',ts:Date.now()}); }catch(e){} }).catch(function(){}); }catch(e){} }
+    }catch(e){ messaging=null; derr('Push init error',e); } }
+  function killOldFcmWorkers(){
+    if(!navigator.serviceWorker||!navigator.serviceWorker.getRegistrations) return Promise.resolve();
+    return navigator.serviceWorker.getRegistrations().then(function(regs){
+      var kills=(regs||[]).filter(function(r){
+        var sc=r.scope||''; var w=r.active||r.waiting||r.installing; var url=(w&&w.scriptURL)||'';
+        return sc.indexOf('firebase-cloud-messaging-push-scope')>-1 || url.indexOf('firebase-messaging-sw')>-1;
+      });
+      return Promise.all(kills.map(function(r){return r.unregister().catch(function(){});}));
+    }).catch(function(){});
+  }
+  function register(userId,name){ if(!messaging){return dbg('Push: messaging not ready');}
+    if(!userId) return;
+    if(typeof Notification==='undefined'||Notification.permission!=='granted'){return dbg('Push: notifications not allowed ('+(typeof Notification!=='undefined'?Notification.permission:'n/a')+')');}
+    var checkSw=function(){ try{ if(navigator.serviceWorker&&navigator.serviceWorker.getRegistration){ navigator.serviceWorker.getRegistration('/firebase-cloud-messaging-push-scope').then(function(reg){ var sw=reg&&(reg.active||reg.waiting); if(!sw)return; var mc=new MessageChannel(); mc.port1.onmessage=function(ev){ if(ev.data&&ev.data!=='ok') derr('Background handler note',{message:ev.data}); }; sw.postMessage({q:'fcmStatus'},[mc.port2]); }).catch(function(){}); } }catch(_){} };
+    var save=function(token){ if(!token){return dbg('Push: no token returned');}
+      firebase.firestore().collection('pushTokens').doc(token).set({userId:userId,name:name||'',ts:Date.now()})
+        .then(function(){dbg('Push registered \u2713'); checkSw();})
+        .catch(function(e){derr('Push save error',e);}); };
+    try{
+      if(navigator.serviceWorker&&navigator.serviceWorker.register){
+        killOldFcmWorkers()
+          .then(function(){ return navigator.serviceWorker.register('/firebase-messaging-sw.js',{scope:'/firebase-cloud-messaging-push-scope',updateViaCache:'none'}); })
+          .then(function(reg){ return messaging.getToken({vapidKey:VAPID_PUBLIC_KEY,serviceWorkerRegistration:reg}); })
+          .then(save)
+          .catch(function(e){derr('Push token error',e);});
+      } else {
+        messaging.getToken({vapidKey:VAPID_PUBLIC_KEY}).then(save).catch(function(e){derr('Push token error',e);});
+      }
+    }catch(e){derr('Push error',e);} }
   return {init:init, register:register};
 })();
 const Cloud=(function(){
@@ -776,12 +805,13 @@ const Cloud=(function(){
   function scheduleFlush(){ if(!enabled()||!ready||!canFlush)return; dirty=true; if(flushTimer)clearTimeout(flushTimer); flushTimer=setTimeout(flush,500); }
   function init(){ if(!enabled()||typeof firebase==='undefined')return;
     try{ firebase.initializeApp(FIREBASE_CONFIG); db=firebase.firestore();
-      try{Push.init();}catch(e){} try{registerPushIfCrew();}catch(e){}
+      try{Push.init();}catch(e){}
       try{db.enablePersistence({synchronizeTabs:true}).catch(function(){});}catch(e){}
       firebase.auth().onAuthStateChanged(function(u){ if(!u||ready)return; ready=true;
         ARRAY_COLLECTIONS.forEach(listenArray);
         listenMeta('tasks','tasks','list',function(d){S.tasks=d.list||[];});
         listenMeta('oncall','oncall','map',function(d){S.oncall=d.map||{};});
+        try{registerPushIfCrew();}catch(e){}
         try{toast('Cloud sync on');}catch(e){} });
       firebase.auth().signInAnonymously().catch(function(){});
     }catch(e){} }
