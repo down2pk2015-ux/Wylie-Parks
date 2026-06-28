@@ -1,0 +1,16 @@
+{
+  "name": "Wylie Parks Work Orders",
+  "short_name": "Parks WO",
+  "description": "Work-order dispatch, recurring tasks, and timekeeping for City of Wylie Parks & Recreation. One City, One Team.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#ffffff",
+  "theme_color": "#1d4d33",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
