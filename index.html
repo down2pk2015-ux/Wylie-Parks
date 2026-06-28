@@ -10,6 +10,7 @@
 <script defer src="https://www.gstatic.com/firebasejs/10.12.5/firebase-app-compat.js"></script>
 <script defer src="https://www.gstatic.com/firebasejs/10.12.5/firebase-auth-compat.js"></script>
 <script defer src="https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore-compat.js"></script>
+<script defer src="https://www.gstatic.com/firebasejs/10.12.5/firebase-messaging-compat.js"></script>
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Wylie Parks Work Orders</title>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -729,6 +730,19 @@ const now=()=>new Date().toISOString();
    (The apiKey is meant to be public in client apps — security is enforced by Firestore rules.) */
 const FIREBASE_CONFIG={apiKey:"AIzaSyBQmVm-VFtPIFYN4S2vhB6cvvDW7GwBq5o",authDomain:"wylie-parks.firebaseapp.com",projectId:"wylie-parks",storageBucket:"wylie-parks.firebasestorage.app",messagingSenderId:"224560721652",appId:"1:224560721652:web:fc887bd8962adab43af8a1"};
 const ARRAY_COLLECTIONS=['employees','orders','hours','recurring','positions','parks']; // per-record docs (id, or name for parks)
+const VAPID_PUBLIC_KEY="BAQZUVwHqOXll-9wLzDWwkwkdW_3tGGMdWImu9jwpPc3IY3H4RsZnf4KFdAfhGoOsZ9F1_w0XbkM_BEfnq1tAJU"; /* PASTE your Web Push certificate PUBLIC key here: Firebase Console -> Project settings -> Cloud Messaging -> Web Push certificates -> Generate key pair. Pushes stay OFF until this is filled in; the app works normally either way. */
+const Push=(function(){
+  let messaging=null;
+  function init(){ if(typeof firebase==='undefined'||!firebase.messaging||!VAPID_PUBLIC_KEY) return;
+    try{ messaging=firebase.messaging();
+      messaging.onMessage(function(p){ try{ var n=(p&&p.notification)||{}; toast((n.title?n.title+' \u2014 ':'')+(n.body||'New work order'),'good'); }catch(e){} });
+    }catch(e){ messaging=null; } }
+  function register(userId,name){ if(!messaging||!userId) return;
+    if(typeof Notification==='undefined'||Notification.permission!=='granted') return;
+    try{ messaging.getToken({vapidKey:VAPID_PUBLIC_KEY}).then(function(token){ if(!token)return;
+        try{ firebase.firestore().collection('pushTokens').doc(token).set({userId:userId,name:name||'',ts:Date.now()}); }catch(e){} }).catch(function(){}); }catch(e){} }
+  return {init:init, register:register};
+})();
 const Cloud=(function(){
   let db=null,ready=false,canFlush=false,pendingRender=false,flushTimer=null,dirty=false,rafPending=false;
   const cache={},firstSeen={};
@@ -762,6 +776,7 @@ const Cloud=(function(){
   function scheduleFlush(){ if(!enabled()||!ready||!canFlush)return; dirty=true; if(flushTimer)clearTimeout(flushTimer); flushTimer=setTimeout(flush,500); }
   function init(){ if(!enabled()||typeof firebase==='undefined')return;
     try{ firebase.initializeApp(FIREBASE_CONFIG); db=firebase.firestore();
+      try{Push.init();}catch(e){} try{registerPushIfCrew();}catch(e){}
       try{db.enablePersistence({synchronizeTabs:true}).catch(function(){});}catch(e){}
       firebase.auth().onAuthStateChanged(function(u){ if(!u||ready)return; ready=true;
         ARRAY_COLLECTIONS.forEach(listenArray);
@@ -2479,12 +2494,13 @@ function notifState(){if(!notifSupported())return 'Notifications not available h
   if(Notification.permission==='granted')return 'Task notifications: On';
   if(Notification.permission==='denied')return 'Notifications blocked — enable in browser settings';
   return 'Turn on task notifications';}
-function maybeRequestNotif(){if(notifSupported()&&Notification.permission==='default'){try{Notification.requestPermission().catch(()=>{});}catch(e){}}}
+function registerPushIfCrew(){try{if(typeof Push!=='undefined'&&S.session&&S.session.role==='crew'){var e=emp(S.session.userId);Push.register(S.session.userId,e?e.name:'');}}catch(_){}}
+function maybeRequestNotif(){if(!notifSupported())return;if(Notification.permission==='granted'){registerPushIfCrew();return;}if(Notification.permission==='default'){try{Notification.requestPermission().then(function(p){if(p==='granted')registerPushIfCrew();}).catch(()=>{});}catch(e){}}}
 function enableNotifs(){
   if(!notifSupported()){toast('This device doesn’t support notifications.');return;}
   if(Notification.permission==='granted'){toast('Notifications are already on.');return;}
   if(Notification.permission==='denied'){toast('Notifications are blocked in your browser settings.');return;}
-  Notification.requestPermission().then(p=>{toast(p==='granted'?'Notifications turned on.':'Notifications not enabled.');if(document.getElementById('scrim').classList.contains('show'))openProfile();});
+  Notification.requestPermission().then(p=>{if(p==='granted')registerPushIfCrew();toast(p==='granted'?'Notifications turned on.':'Notifications not enabled.');if(document.getElementById('scrim').classList.contains('show'))openProfile();});
 }
 let newTaskAlert=[];
 function checkNewTasks(){

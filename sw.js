@@ -1,4 +1,4 @@
-const CACHE = 'wylie-parks-v5';
+const CACHE = 'wylie-parks-v7';
 self.addEventListener('install', e => {
   self.skipWaiting();
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(['./','./index.html','./manifest.webmanifest'])).catch(()=>{}));
