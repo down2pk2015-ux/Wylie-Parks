@@ -6,6 +6,10 @@
 <meta name="theme-color" content="#1c4a32" id="themeColor">
 <link rel="manifest" href="manifest.webmanifest">
 <meta name="apple-mobile-web-app-capable" content="yes">
+<!-- Cloud sync SDK (deferred so the splash paints instantly; harmless if config is empty or offline) -->
+<script defer src="https://www.gstatic.com/firebasejs/10.12.5/firebase-app-compat.js"></script>
+<script defer src="https://www.gstatic.com/firebasejs/10.12.5/firebase-auth-compat.js"></script>
+<script defer src="https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore-compat.js"></script>
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Wylie Parks Work Orders</title>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -373,6 +377,7 @@ body.emp .toast{bottom:96px}
 .photo-btn{display:flex;align-items:center;justify-content:center;gap:10px;width:100%;border:2px dashed var(--line);
   background:var(--paper-2);border-radius:12px;padding:18px;cursor:pointer;font-weight:700;color:var(--pine);font-size:16px;min-height:64px}
 .photo-btn:hover{border-color:var(--trail)}
+@media(min-width:620px){.photo-btn{padding:10px 14px;min-height:46px;font-size:14px;gap:8px}}
 .photo-prev{position:relative;margin-top:4px}
 .photo-prev img{width:100%;border-radius:12px;border:1.5px solid var(--line);max-height:260px;object-fit:cover;display:block}
 .photo-prev .rm{position:absolute;top:8px;right:8px;background:rgba(0,0,0,.65);color:#fff;border:none;width:38px;height:38px;border-radius:50%;font-size:18px;cursor:pointer}
@@ -715,6 +720,58 @@ const DB={
 };
 const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,7);
 const now=()=>new Date().toISOString();
+/* ===================== CLOUD SYNC (cross-device) =====================
+   Paste your Firebase web config below to turn on live sync across phones & PCs.
+   Leave projectId empty to keep the app fully local (per-device), exactly as before.
+   (The apiKey is meant to be public in client apps — security is enforced by Firestore rules.) */
+const FIREBASE_CONFIG={apiKey:"AIzaSyBQmVm-VFtPIFYN4S2vhB6cvvDW7GwBq5o",authDomain:"wylie-parks.firebaseapp.com",projectId:"wylie-parks",storageBucket:"wylie-parks.firebasestorage.app",messagingSenderId:"224560721652",appId:"1:224560721652:web:fc887bd8962adab43af8a1"};
+const ARRAY_COLLECTIONS=['employees','orders','hours','recurring','positions','parks']; // per-record docs (id, or name for parks)
+const Cloud=(function(){
+  let db=null,ready=false,canFlush=false,pendingRender=false,flushTimer=null,dirty=false;
+  const cache={},firstSeen={};
+  function enabled(){return !!(FIREBASE_CONFIG&&FIREBASE_CONFIG.projectId);}
+  function sanitize(k){return (String(k).replace(/[\/#?\[\]\s]+/g,'_').slice(0,140))||'_';}
+  function docKey(col,rec){ if(col==='parks')return rec&&rec.name?sanitize(rec.name):null; return rec&&rec.id!=null?sanitize(rec.id):null; }
+  function outFor(col,rec){ if(col==='parks'&&rec&&rec.photo&&PARK_PHOTOS[rec.name]===rec.photo){const c=Object.assign({},rec);delete c.photo;return c;} return rec; }
+  function maybeRender(){ const s=document.getElementById('scrim'); if(s&&s.classList.contains('show')){pendingRender=true;return;} pendingRender=false; try{render();}catch(e){} }
+  function checkReady(){ if(ARRAY_COLLECTIONS.every(c=>firstSeen[c])&&firstSeen['m_tasks']&&firstSeen['m_oncall'])canFlush=true; }
+  function reconcile(col){ if(!ready)return; const cm=cache[col]||(cache[col]={}),seen={},batch=db.batch();let n=0;
+    (S[col]||[]).forEach(function(rec){ const key=docKey(col,rec); if(!key)return; seen[key]=1; const out=outFor(col,rec),js=JSON.stringify(out); if(cm[key]!==js){batch.set(db.collection(col).doc(key),out);cm[key]=js;n++;} });
+    Object.keys(cm).forEach(function(k){ if(!seen[k]){batch.delete(db.collection(col).doc(k));delete cm[k];n++;} });
+    if(n)batch.commit().catch(function(){}); }
+  function listenArray(col){ db.collection(col).onSnapshot(function(snap){
+      const first=!firstSeen[col];firstSeen[col]=true; const arr=[],cm={};
+      snap.forEach(function(d){const v=d.data();arr.push(v);cm[d.id]=JSON.stringify(outFor(col,v));}); cache[col]=cm;
+      if(snap.empty&&first&&Array.isArray(S[col])&&S[col].length){ reconcile(col); }
+      else { S[col]=arr; if(col==='parks'){try{attachParkPhotos();}catch(e){}} try{DB.save(col,S[col]);}catch(e){} maybeRender(); }
+      checkReady();
+    },function(){}); }
+  function listenMeta(name,prop,field,apply){ db.collection('meta').doc(name).onSnapshot(function(d){
+      const first=!firstSeen['m_'+name];firstSeen['m_'+name]=true;
+      if(d.exists){apply(d.data());try{DB.save(prop,S[prop]);}catch(e){}maybeRender();}
+      else if(first){const p={};p[field]=S[prop];db.collection('meta').doc(name).set(p).catch(function(){});}
+      checkReady();
+    },function(){}); }
+  function flush(){ flushTimer=null; if(!ready||!canFlush||!dirty)return; dirty=false;
+    ARRAY_COLLECTIONS.forEach(reconcile);
+    db.collection('meta').doc('tasks').set({list:S.tasks||[]}).catch(function(){});
+    db.collection('meta').doc('oncall').set({map:S.oncall||{}}).catch(function(){}); }
+  function scheduleFlush(){ if(!enabled()||!ready||!canFlush)return; dirty=true; if(flushTimer)clearTimeout(flushTimer); flushTimer=setTimeout(flush,500); }
+  function init(){ if(!enabled()||typeof firebase==='undefined')return;
+    try{ firebase.initializeApp(FIREBASE_CONFIG); db=firebase.firestore();
+      try{db.enablePersistence({synchronizeTabs:true}).catch(function(){});}catch(e){}
+      firebase.auth().onAuthStateChanged(function(u){ if(!u||ready)return; ready=true;
+        ARRAY_COLLECTIONS.forEach(listenArray);
+        listenMeta('tasks','tasks','list',function(d){S.tasks=d.list||[];});
+        listenMeta('oncall','oncall','map',function(d){S.oncall=d.map||{};});
+        try{toast('Cloud sync on');}catch(e){} });
+      firebase.auth().signInAnonymously().catch(function(){});
+    }catch(e){} }
+  return {init:init,scheduleFlush:scheduleFlush,enabled:enabled,
+    flushPending:function(){ if(pendingRender){pendingRender=false;try{render();}catch(e){}} }};
+})();
+window.addEventListener('load',function(){ try{Cloud.init();}catch(e){} });
+/* =================== end cloud sync =================== */
 /* ---------- theme (light / dark) ---------- */
 let appTheme=DB.load('theme',((window.matchMedia&&matchMedia('(prefers-color-scheme:dark)').matches)?'dark':'light'));
 function applyTheme(){const dark=appTheme==='dark';document.body.classList.toggle('dark',dark);
@@ -872,7 +929,7 @@ let S={
   calY:new Date().getFullYear(), calM:new Date().getMonth(),
   empCalMode:'month', supCalMode:'biweek',
 };
-function persist(){DB.save('employees',S.employees);DB.save('orders',S.orders);DB.save('hours',S.hours);DB.save('recurring',S.recurring);DB.save('session',S.session);DB.save('oncall',S.oncall);DB.save('tasks',S.tasks);DB.save('positions',S.positions);DB.save('parks',S.parks);}
+function persist(){DB.save('employees',S.employees);DB.save('orders',S.orders);DB.save('hours',S.hours);DB.save('recurring',S.recurring);DB.save('session',S.session);DB.save('oncall',S.oncall);DB.save('tasks',S.tasks);DB.save('positions',S.positions);DB.save('parks',S.parks);Cloud.scheduleFlush();}
 migrate();attachParkPhotos();
 /* ---- week / on-call helpers (weeks start Sunday to match the calendar) ---- */
 function weekStartDate(d){const x=new Date(d);x.setHours(0,0,0,0);x.setDate(x.getDate()-x.getDay());return x;}
@@ -2480,7 +2537,7 @@ function openSheet(title,html){
   document.getElementById('scrim').classList.add('show');
   document.body.style.overflow='hidden';
 }
-function closeSheet(){document.getElementById('scrim').classList.remove('show');document.body.style.overflow='';}
+function closeSheet(){document.getElementById('scrim').classList.remove('show');document.body.style.overflow='';try{Cloud.flushPending();}catch(e){}}
 document.getElementById('sheetClose').onclick=closeSheet;
 document.getElementById('scrim').onclick=e=>{if(e.target.id==='scrim')closeSheet();};
 
@@ -2509,7 +2566,7 @@ function buildBotnav(){
   nav.innerHTML=items.map(it=>`<button class="${S.supTab===it[0]?'active':''}" style="${tabStyle(it[0])}" onclick="S.supTab='${it[0]}';render()"><span class="ti">${it[2]}${it[3]?`<span class="badge">${it[3]}</span>`:''}</span><span>${it[1]}</span></button>`).join('');
 }
 
-/* PWA: real manifest + service worker files */
+/* ============================================================ PWA: inline manifest + service worker ============================================================ */
 if('serviceWorker' in navigator){window.addEventListener('load',function(){navigator.serviceWorker.register('sw.js').catch(function(){});});}
 
 /* ---- go ---- */
